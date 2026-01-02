@@ -39,6 +39,19 @@
             border-radius: 4px;
             border: 1px solid #ccc;
         }
+        .loading-bar {
+            width: 100%;
+            height: 4px;
+            background: #e5e7eb;
+            border-radius: 2px;
+            overflow: hidden;
+            margin-top: 8px;
+        }
+        .loading-bar-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #2C5134, #4a9d6f);
+            transition: width 0.3s ease;
+        }
     </style>
 </head>
 <body>
@@ -47,7 +60,6 @@
     <script type="text/babel">
         const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
-        // Configuration
         const CONFIG = {
             STORES_SHEET_ID: '1mzQ6P6REhGzu9LAlhosF1toF-j21jGadjKOppIbsoKc',
             STORES_SHEET_NAME: 'public',
@@ -57,6 +69,22 @@
             REFRESH_MINUTES: 3,
             RESERVE_URL: 'https://docs.google.com/forms/d/e/1FAIpQLSdgGe9EyaLg8RcbaRdKFTyP3PJnaoR8UrmxKMi0c_MGQ6o8FQ/viewform',
             DEBOUNCE_DELAY: 300,
+            GEOJSON_BASE_URL: 'https://raw.githubusercontent.com/OpenDataDE/State-zip-code-GeoJSON/master/',
+            STATE_ABBREV: {
+                'AL': 'al_alabama', 'AK': 'ak_alaska', 'AZ': 'az_arizona', 'AR': 'ar_arkansas',
+                'CA': 'ca_california', 'CO': 'co_colorado', 'CT': 'ct_connecticut', 'DE': 'de_delaware',
+                'FL': 'fl_florida', 'GA': 'ga_georgia', 'HI': 'hi_hawaii', 'ID': 'id_idaho',
+                'IL': 'il_illinois', 'IN': 'in_indiana', 'IA': 'ia_iowa', 'KS': 'ks_kansas',
+                'KY': 'ky_kentucky', 'LA': 'la_louisiana', 'ME': 'me_maine', 'MD': 'md_maryland',
+                'MA': 'ma_massachusetts', 'MI': 'mi_michigan', 'MN': 'mn_minnesota', 'MS': 'ms_mississippi',
+                'MO': 'mo_missouri', 'MT': 'mt_montana', 'NE': 'ne_nebraska', 'NV': 'nv_nevada',
+                'NH': 'nh_new_hampshire', 'NJ': 'nj_new_jersey', 'NM': 'nm_new_mexico', 'NY': 'ny_new_york',
+                'NC': 'nc_north_carolina', 'ND': 'nd_north_dakota', 'OH': 'oh_ohio', 'OK': 'ok_oklahoma',
+                'OR': 'or_oregon', 'PA': 'pa_pennsylvania', 'RI': 'ri_rhode_island', 'SC': 'sc_south_carolina',
+                'SD': 'sd_south_dakota', 'TN': 'tn_tennessee', 'TX': 'tx_texas', 'UT': 'ut_utah',
+                'VT': 'vt_vermont', 'VA': 'va_virginia', 'WA': 'wa_washington', 'WV': 'wv_west_virginia',
+                'WI': 'wi_wisconsin', 'WY': 'wy_wyoming', 'DC': 'dc_district_of_columbia'
+            },
             TIER_COLORS: {
                 1: { fill: '#1e5631', fillOpacity: 0.35, stroke: '#1e5631', strokeWeight: 1.5 },
                 2: { fill: '#2d7a4a', fillOpacity: 0.28, stroke: '#2d7a4a', strokeWeight: 1.5 },
@@ -65,13 +93,10 @@
             }
         };
 
-        // Global variables for Google Maps
         let map = null;
         let markers = [];
         let zipPolygons = [];
-        let geocoder = null;
 
-        // Debounce utility
         const debounce = (func, delay) => {
             let timeoutId;
             return (...args) => {
@@ -80,7 +105,6 @@
             };
         };
 
-        // Icons
         const Search = ({ className }) => (
             <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
@@ -112,6 +136,13 @@
             </svg>
         );
 
+        const Target = ({ className }) => (
+            <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4-1.79-4-4-4zm0 6c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z" />
+                <circle cx="12" cy="12" r="10" strokeWidth={2} />
+            </svg>
+        );
+
         window.initMap = function() {
             console.log('Google Maps API loaded');
         };
@@ -121,9 +152,12 @@
             const [zipData, setZipData] = useState([]);
             const [loading, setLoading] = useState(true);
             const [zipLoading, setZipLoading] = useState(false);
+            const [loadingProgress, setLoadingProgress] = useState(0);
+            const [loadingMessage, setLoadingMessage] = useState('');
             const [error, setError] = useState('');
             const [lastUpdated, setLastUpdated] = useState(null);
             const [searchTerm, setSearchTerm] = useState('');
+            const [zipSearchTerm, setZipSearchTerm] = useState('');
             const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
             const [stateFilter, setStateFilter] = useState('all');
             const [tierFilter, setTierFilter] = useState('all');
@@ -134,6 +168,7 @@
             const [zipBoundariesLoaded, setZipBoundariesLoaded] = useState(false);
             const mapRef = useRef(null);
             const [mapLoaded, setMapLoaded] = useState(false);
+            const zipDataMapRef = useRef(new Map());
 
             const debouncedSetSearch = useCallback(
                 debounce((value) => {
@@ -146,6 +181,44 @@
                 const value = e.target.value;
                 setSearchTerm(value);
                 debouncedSetSearch(value);
+            };
+
+            const handleZipSearch = () => {
+                const zip = zipSearchTerm.trim();
+                if (!zip || !/^\d{5}$/.test(zip)) {
+                    alert('Please enter a valid 5-digit zip code');
+                    return;
+                }
+
+                const zipInfo = zipData.find(z => z.zipCode === zip);
+                if (!zipInfo) {
+                    alert('Zip code ' + zip + ' not found in coverage areas');
+                    return;
+                }
+
+                setSelectedZip(zipInfo);
+                setSelectedStore(null);
+
+                const polygon = zipPolygons.find(p => p.zipData && p.zipData.zipCode === zip);
+                if (polygon && polygon.getPath()) {
+                    const bounds = new window.google.maps.LatLngBounds();
+                    polygon.getPath().getArray().forEach(coord => bounds.extend(coord));
+                    map.fitBounds(bounds);
+                    map.setZoom(Math.min(map.getZoom(), 12));
+
+                    polygon.setOptions({
+                        strokeWeight: 3,
+                        fillOpacity: 0.5
+                    });
+
+                    setTimeout(() => {
+                        const tierStyle = CONFIG.TIER_COLORS[zipInfo.tier] || CONFIG.TIER_COLORS.default;
+                        polygon.setOptions({
+                            strokeWeight: tierStyle.strokeWeight,
+                            fillOpacity: tierStyle.fillOpacity
+                        });
+                    }, 2000);
+                }
             };
 
             const initializeMap = () => {
@@ -168,58 +241,21 @@
                             strictBounds: false,
                         },
                         styles: [
-                            {
-                                featureType: 'poi',
-                                elementType: 'labels',
-                                stylers: [{ visibility: 'off' }]
-                            },
-                            {
-                                featureType: 'road',
-                                elementType: 'labels',
-                                stylers: [{ visibility: 'off' }]
-                            },
-                            {
-                                featureType: 'road.local',
-                                elementType: 'geometry',
-                                stylers: [{ visibility: 'off' }]
-                            },
-                            {
-                                featureType: 'road.arterial',
-                                elementType: 'geometry',
-                                stylers: [{ lightness: 20 }]
-                            },
-                            {
-                                featureType: 'water',
-                                elementType: 'labels',
-                                stylers: [{ visibility: 'off' }]
-                            },
-                            {
-                                featureType: 'administrative.locality',
-                                elementType: 'labels',
-                                stylers: [{ visibility: 'off' }]
-                            },
-                            {
-                                featureType: 'landscape',
-                                elementType: 'labels',
-                                stylers: [{ visibility: 'off' }]
-                            },
-                            {
-                                featureType: 'administrative.province',
-                                elementType: 'geometry.stroke',
-                                stylers: [{ color: '#999999', weight: 1 }]
-                            },
-                            {
-                                featureType: 'transit',
-                                elementType: 'all',
-                                stylers: [{ visibility: 'off' }]
-                            }
+                            { featureType: 'poi', elementType: 'labels', stylers: [{ visibility: 'off' }] },
+                            { featureType: 'road', elementType: 'labels', stylers: [{ visibility: 'off' }] },
+                            { featureType: 'road.local', elementType: 'geometry', stylers: [{ visibility: 'off' }] },
+                            { featureType: 'road.arterial', elementType: 'geometry', stylers: [{ lightness: 20 }] },
+                            { featureType: 'water', elementType: 'labels', stylers: [{ visibility: 'off' }] },
+                            { featureType: 'administrative.locality', elementType: 'labels', stylers: [{ visibility: 'off' }] },
+                            { featureType: 'landscape', elementType: 'labels', stylers: [{ visibility: 'off' }] },
+                            { featureType: 'administrative.province', elementType: 'geometry.stroke', stylers: [{ color: '#999999', weight: 1 }] },
+                            { featureType: 'transit', elementType: 'all', stylers: [{ visibility: 'off' }] }
                         ],
                         streetViewControl: false,
                         fullscreenControl: false,
                         mapTypeControl: false
                     });
 
-                    geocoder = new window.google.maps.Geocoder();
                     setMapLoaded(true);
                     return true;
                 } catch (error) {
@@ -229,9 +265,7 @@
             };
 
             const addMarkersToMap = useCallback((storeData) => {
-                if (!map || !window.google) {
-                    return;
-                }
+                if (!map || !window.google) return;
 
                 setIsUpdatingMarkers(true);
 
@@ -273,103 +307,136 @@
                 });
             }, []);
 
-            const fetchZipBoundaries = async (zipCode) => {
-                return new Promise((resolve) => {
-                    geocoder.geocode(
-                        { 
-                            address: zipCode,
-                            componentRestrictions: { country: 'US' }
-                        },
-                        (results, status) => {
-                            if (status === 'OK' && results[0] && results[0].geometry && results[0].geometry.bounds) {
-                                const bounds = results[0].geometry.bounds;
-                                const ne = bounds.getNorthEast();
-                                const sw = bounds.getSouthWest();
-                                
-                                const paths = [
-                                    { lat: ne.lat(), lng: ne.lng() },
-                                    { lat: ne.lat(), lng: sw.lng() },
-                                    { lat: sw.lat(), lng: sw.lng() },
-                                    { lat: sw.lat(), lng: ne.lng() }
-                                ];
-                                
-                                resolve(paths);
-                            } else {
-                                resolve(null);
-                            }
-                        }
-                    );
-                });
-            };
-
-            const loadZipPolygons = async () => {
-                if (zipBoundariesLoaded || zipData.length === 0 || !map) {
-                    return;
-                }
+            const loadZipBoundariesFromGeoJSON = async () => {
+                if (zipBoundariesLoaded || zipData.length === 0 || !map) return;
 
                 setZipLoading(true);
-                console.log('Loading zip boundaries for', zipData.length, 'zips');
+                setLoadingProgress(0);
+                setLoadingMessage('Preparing to load coverage areas...');
 
                 zipPolygons.forEach(polygon => polygon.setMap(null));
                 zipPolygons = [];
 
-                const batchSize = 10;
-                const delay = 1000;
+                const filteredZips = tierFilter === 'all' 
+                    ? zipData
+                    : zipData.filter(z => z.tier === parseInt(tierFilter));
 
-                for (let i = 0; i < zipData.length; i += batchSize) {
-                    const batch = zipData.slice(i, i + batchSize);
-                    
-                    await Promise.all(
-                        batch.map(async (zip) => {
-                            const paths = await fetchZipBoundaries(zip.zipCode);
-                            
-                            if (paths) {
-                                const tierStyle = CONFIG.TIER_COLORS[zip.tier] || CONFIG.TIER_COLORS.default;
-                                
-                                const polygon = new window.google.maps.Polygon({
-                                    paths: paths,
-                                    strokeColor: tierStyle.stroke,
-                                    strokeOpacity: 0.8,
-                                    strokeWeight: tierStyle.strokeWeight,
-                                    fillColor: tierStyle.fill,
-                                    fillOpacity: tierStyle.fillOpacity,
-                                    map: showZipLayer ? map : null,
-                                    zIndex: 1
-                                });
+                const uniqueStates = [...new Set(filteredZips.map(z => z.state))];
+                console.log('Loading zip boundaries for states:', uniqueStates);
 
-                                polygon.addListener('click', () => {
-                                    setSelectedZip(zip);
-                                    setSelectedStore(null);
-                                });
-
-                                polygon.addListener('mouseover', function() {
-                                    this.setOptions({
-                                        fillOpacity: tierStyle.fillOpacity + 0.15,
-                                        strokeWeight: tierStyle.strokeWeight + 1
-                                    });
-                                });
-
-                                polygon.addListener('mouseout', function() {
-                                    this.setOptions({
-                                        fillOpacity: tierStyle.fillOpacity,
-                                        strokeWeight: tierStyle.strokeWeight
-                                    });
-                                });
-
-                                polygon.zipData = zip;
-                                zipPolygons.push(polygon);
-                            }
-                        })
-                    );
-
-                    if (i + batchSize < zipData.length) {
-                        await new Promise(resolve => setTimeout(resolve, delay));
+                const cacheKey = 'zipBoundaries_v1';
+                let boundariesCache = {};
+                
+                try {
+                    const cached = localStorage.getItem(cacheKey);
+                    if (cached) {
+                        boundariesCache = JSON.parse(cached);
+                        console.log('Loaded boundaries from cache');
                     }
+                } catch (e) {
+                    console.log('No cache available');
+                }
+
+                let loadedCount = 0;
+                const totalStates = uniqueStates.length;
+
+                for (const state of uniqueStates) {
+                    const stateFile = CONFIG.STATE_ABBREV[state];
+                    if (!stateFile) {
+                        console.warn('No GeoJSON file mapping for state:', state);
+                        loadedCount++;
+                        continue;
+                    }
+
+                    setLoadingMessage('Loading ' + state + '... (' + (loadedCount + 1) + '/' + totalStates + ')');
+                    setLoadingProgress(((loadedCount / totalStates) * 100));
+
+                    try {
+                        let geoJSON;
+                        
+                        if (boundariesCache[state]) {
+                            geoJSON = boundariesCache[state];
+                        } else {
+                            const url = CONFIG.GEOJSON_BASE_URL + stateFile + '_zip_codes_geo.min.json';
+                            const response = await fetch(url);
+                            if (!response.ok) throw new Error('Failed to load ' + state);
+                            geoJSON = await response.json();
+                            boundariesCache[state] = geoJSON;
+                        }
+
+                        if (geoJSON && geoJSON.features) {
+                            geoJSON.features.forEach(feature => {
+                                const zipCode = feature.properties.ZCTA5CE10 || feature.properties.GEOID10 || feature.properties.ZIP;
+                                const zipInfo = filteredZips.find(z => z.zipCode === zipCode);
+
+                                if (zipInfo && feature.geometry && feature.geometry.coordinates) {
+                                    const tierStyle = CONFIG.TIER_COLORS[zipInfo.tier] || CONFIG.TIER_COLORS.default;
+
+                                    const paths = feature.geometry.coordinates.map(ring => {
+                                        return (ring[0] && Array.isArray(ring[0]) && typeof ring[0][0] === 'number') 
+                                            ? ring.map(coord => ({ lat: coord[1], lng: coord[0] }))
+                                            : ring[0].map(coord => ({ lat: coord[1], lng: coord[0] }));
+                                    });
+
+                                    const polygon = new window.google.maps.Polygon({
+                                        paths: paths[0],
+                                        strokeColor: tierStyle.stroke,
+                                        strokeOpacity: 0.8,
+                                        strokeWeight: tierStyle.strokeWeight,
+                                        fillColor: tierStyle.fill,
+                                        fillOpacity: tierStyle.fillOpacity,
+                                        map: showZipLayer ? map : null,
+                                        zIndex: 1
+                                    });
+
+                                    polygon.zipData = zipInfo;
+
+                                    polygon.addListener('click', () => {
+                                        setSelectedZip(zipInfo);
+                                        setSelectedStore(null);
+                                    });
+
+                                    polygon.addListener('mouseover', function() {
+                                        this.setOptions({
+                                            fillOpacity: tierStyle.fillOpacity + 0.15,
+                                            strokeWeight: tierStyle.strokeWeight + 1
+                                        });
+                                    });
+
+                                    polygon.addListener('mouseout', function() {
+                                        this.setOptions({
+                                            fillOpacity: tierStyle.fillOpacity,
+                                            strokeWeight: tierStyle.strokeWeight
+                                        });
+                                    });
+
+                                    zipPolygons.push(polygon);
+                                }
+                            });
+                        }
+                    } catch (error) {
+                        console.error('Error loading GeoJSON for', state, ':', error);
+                    }
+
+                    loadedCount++;
+                    setLoadingProgress(((loadedCount / totalStates) * 100));
+                }
+
+                try {
+                    localStorage.setItem(cacheKey, JSON.stringify(boundariesCache));
+                } catch (e) {
+                    console.log('Could not cache boundaries');
                 }
 
                 setZipBoundariesLoaded(true);
                 setZipLoading(false);
+                setLoadingProgress(100);
+                setLoadingMessage('Loaded ' + zipPolygons.length + ' zip code boundaries');
                 console.log('Loaded', zipPolygons.length, 'zip polygons');
+
+                setTimeout(() => {
+                    setLoadingMessage('');
+                }, 3000);
             };
 
             const toggleZipLayer = () => {
@@ -377,11 +444,11 @@
                 setShowZipLayer(newState);
 
                 if (newState && !zipBoundariesLoaded) {
-                    loadZipPolygons();
+                    loadZipBoundariesFromGeoJSON();
+                } else if (newState && zipBoundariesLoaded) {
+                    zipPolygons.forEach(polygon => polygon.setMap(map));
                 } else {
-                    zipPolygons.forEach(polygon => {
-                        polygon.setMap(newState ? map : null);
-                    });
+                    zipPolygons.forEach(polygon => polygon.setMap(null));
                 }
             };
 
@@ -394,15 +461,11 @@
                     let url = 'https://sheets.googleapis.com/v4/spreadsheets/' + CONFIG.STORES_SHEET_ID + '/values/' + encodedSheetName + '?key=' + CONFIG.API_KEY;
                     
                     let response = await fetch(url);
-                    
                     if (!response.ok) {
                         url = 'https://sheets.googleapis.com/v4/spreadsheets/' + CONFIG.STORES_SHEET_ID + '/values/A:Z?key=' + CONFIG.API_KEY;
                         response = await fetch(url);
                     }
-                    
-                    if (!response.ok) {
-                        throw new Error('Google Sheets API error: ' + response.status);
-                    }
+                    if (!response.ok) throw new Error('Google Sheets API error: ' + response.status);
                     
                     const data = await response.json();
                     const parsedStores = parseGoogleSheetsData(data.values);
@@ -434,7 +497,6 @@
 
             const parseZipData = (values) => {
                 const zips = [];
-                
                 if (!values || values.length < 2) return zips;
 
                 for (let i = 1; i < values.length; i++) {
@@ -447,43 +509,34 @@
                             tier: parseInt(row[3]) || 999,
                             branch: row[4] ? row[4].toString().trim() : ''
                         };
-                        
-                        if (zip.zipCode) {
-                            zips.push(zip);
-                        }
+                        if (zip.zipCode) zips.push(zip);
                     }
                 }
-                
                 return zips;
             };
 
             const parseGoogleSheetsData = (values) => {
                 const stores = [];
-                
                 let headerRowIndex = -1;
+                
                 for (let i = 0; i < Math.min(3, values.length); i++) {
                     if (values[i] && values[i][0] && values[i][0].toString().toLowerCase().includes('status')) {
                         headerRowIndex = i;
                         break;
                     }
                 }
-                
-                if (headerRowIndex === -1) {
-                    return stores;
-                }
+                if (headerRowIndex === -1) return stores;
                 
                 const dataStartIndex = headerRowIndex + 1;
-                
                 for (let i = dataStartIndex; i < values.length; i++) {
                     const row = values[i];
-                    
                     if (row.length >= 20) {
                         const status = row[0] ? row[0].toString().trim().toLowerCase() : '';
                         const lat = parseFloat(row[17]);
                         const lng = parseFloat(row[18]);
                         
                         if (status === 'open' && !isNaN(lat) && !isNaN(lng)) {
-                            const store = {
+                            stores.push({
                                 status: 'Open',
                                 owner: row[1] ? row[1].toString().trim() : '',
                                 retailer: row[9] ? row[9].toString().trim() : '',
@@ -495,12 +548,10 @@
                                 zip: row[19] ? row[19].toString().trim() : '',
                                 latitude: lat,
                                 longitude: lng
-                            };
-                            stores.push(store);
+                            });
                         }
                     }
                 }
-                
                 return stores;
             };
 
@@ -510,12 +561,6 @@
                 if (debouncedSearchTerm.trim()) {
                     filtered = filtered.filter(store => {
                         const searchLower = debouncedSearchTerm.toLowerCase();
-                        const isZipSearch = /^\d{5}$/.test(debouncedSearchTerm);
-                        
-                        if (isZipSearch) {
-                            return store.zip === debouncedSearchTerm;
-                        }
-                        
                         return (
                             (store.storeName || '').toLowerCase().includes(searchLower) ||
                             (store.city || '').toLowerCase().includes(searchLower) ||
@@ -533,16 +578,6 @@
                 return filtered;
             }, [stores, debouncedSearchTerm, stateFilter]);
 
-            const filteredZips = useMemo(() => {
-                let filtered = zipData;
-                
-                if (tierFilter !== 'all') {
-                    filtered = filtered.filter(zip => zip.tier === parseInt(tierFilter));
-                }
-                
-                return filtered;
-            }, [zipData, tierFilter]);
-
             const uniqueStates = [...new Set(stores.map(store => store.state))].filter(state => state && state.trim() !== '').sort();
             const uniqueTiers = [...new Set(zipData.map(zip => zip.tier))].sort((a, b) => a - b);
 
@@ -552,21 +587,16 @@
 
                 const checkGoogleMaps = () => {
                     attempts++;
-                    
                     if (window.google && window.google.maps && window.google.maps.Map && mapRef.current) {
                         const success = initializeMap();
-                        if (success) {
-                            return;
-                        }
+                        if (success) return;
                     }
-                    
                     if (attempts < maxAttempts) {
                         setTimeout(checkGoogleMaps, 100);
                     } else {
                         setError('Failed to load Google Maps. Please refresh the page.');
                     }
                 };
-                
                 checkGoogleMaps();
             }, []);
 
@@ -575,6 +605,13 @@
                     addMarkersToMap(filteredStores);
                 }
             }, [mapLoaded, filteredStores, addMarkersToMap]);
+
+            useEffect(() => {
+                if (showZipLayer && zipBoundariesLoaded) {
+                    setZipBoundariesLoaded(false);
+                    loadZipBoundariesFromGeoJSON();
+                }
+            }, [tierFilter]);
 
             useEffect(() => {
                 fetchFromGoogleSheets();
@@ -642,53 +679,67 @@
                                 <div style={{fontSize: '1rem', fontWeight: 'bold', marginTop: '0.125rem', color: '#1e5631'}}>{zipData.length}</div>
                             </div>
                         </div>
-                        
-                        <div className="flex flex-col lg:flex-row gap-2 md:gap-3 items-stretch lg:items-center">
-                            <div className="flex items-center gap-2 flex-1 min-w-0">
+
+                        <div className="flex flex-col gap-2 mb-2">
+                            <div className="flex items-center gap-2">
                                 <Search className="w-4 h-4 text-gray-500 flex-shrink-0" />
                                 <input
                                     type="text"
-                                    placeholder="Search stores, cities, zip codes..."
+                                    placeholder="Search stores, cities..."
                                     value={searchTerm}
                                     onChange={handleSearchChange}
-                                    className="flex-1 px-2 py-1.5 border rounded-lg text-sm touch-manipulation"
+                                    className="flex-1 px-2 py-1.5 border rounded-lg text-sm"
                                 />
-                                {isUpdatingMarkers && (
-                                    <Loader className="w-4 h-4 animate-spin text-blue-600 flex-shrink-0" />
-                                )}
+                                {isUpdatingMarkers && <Loader className="w-4 h-4 animate-spin text-blue-600 flex-shrink-0" />}
                             </div>
-                            
-                            <div className="flex flex-wrap lg:flex-nowrap items-center gap-2">
-                                <select
-                                    value={stateFilter}
-                                    onChange={(e) => setStateFilter(e.target.value)}
-                                    className="px-2 py-1.5 border rounded-lg text-sm touch-manipulation min-w-0"
-                                >
-                                    <option value="all">All States ({stores.length})</option>
-                                    {uniqueStates.map(state => {
-                                        const stateCount = stores.filter(store => store.state === state).length;
-                                        return (
-                                            <option key={state} value={state}>
-                                                {state || 'Unknown'} ({stateCount})
-                                            </option>
-                                        );
-                                    })}
-                                </select>
 
-                                <select
-                                    value={tierFilter}
-                                    onChange={(e) => setTierFilter(e.target.value)}
-                                    className="px-2 py-1.5 border rounded-lg text-sm touch-manipulation min-w-0"
+                            <div className="flex items-center gap-2">
+                                <Target className="w-4 h-4 text-green-700 flex-shrink-0" />
+                                <input
+                                    type="text"
+                                    placeholder="Quick zip lookup (e.g., 90210)"
+                                    value={zipSearchTerm}
+                                    onChange={(e) => setZipSearchTerm(e.target.value)}
+                                    onKeyPress={(e) => e.key === 'Enter' && handleZipSearch()}
+                                    className="flex-1 px-2 py-1.5 border border-green-300 rounded-lg text-sm"
+                                    maxLength={5}
+                                />
+                                <button
+                                    onClick={handleZipSearch}
+                                    className="px-3 py-1.5 bg-green-700 text-white rounded-lg hover:bg-green-800 text-sm whitespace-nowrap"
                                 >
-                                    <option value="all">All Tiers</option>
-                                    {uniqueTiers.map(tier => (
-                                        <option key={tier} value={tier}>Tier {tier}</option>
-                                    ))}
-                                </select>
-                                
-                                <div className="text-sm text-gray-600 whitespace-nowrap font-medium">
-                                    {filteredStores.length} stores
-                                </div>
+                                    Find Zip
+                                </button>
+                            </div>
+                        </div>
+                        
+                        <div className="flex flex-wrap items-center gap-2">
+                            <select
+                                value={stateFilter}
+                                onChange={(e) => setStateFilter(e.target.value)}
+                                className="px-2 py-1.5 border rounded-lg text-sm"
+                            >
+                                <option value="all">All States ({stores.length})</option>
+                                {uniqueStates.map(state => (
+                                    <option key={state} value={state}>
+                                        {state} ({stores.filter(s => s.state === state).length})
+                                    </option>
+                                ))}
+                            </select>
+
+                            <select
+                                value={tierFilter}
+                                onChange={(e) => setTierFilter(e.target.value)}
+                                className="px-2 py-1.5 border rounded-lg text-sm"
+                            >
+                                <option value="all">All Tiers</option>
+                                {uniqueTiers.map(tier => (
+                                    <option key={tier} value={tier}>Tier {tier}</option>
+                                ))}
+                            </select>
+                            
+                            <div className="text-sm text-gray-600 font-medium">
+                                {filteredStores.length} stores
                             </div>
                         </div>
                     </div>
@@ -713,6 +764,21 @@
                                         Coverage Zip Codes
                                         {zipLoading && <Loader className="w-4 h-4 animate-spin" />}
                                     </label>
+                                    {zipLoading && (
+                                        <div style={{marginTop: '8px'}}>
+                                            <div style={{fontSize: '11px', color: '#666', marginBottom: '4px'}}>
+                                                {loadingMessage}
+                                            </div>
+                                            <div className="loading-bar">
+                                                <div className="loading-bar-fill" style={{width: loadingProgress + '%'}}></div>
+                                            </div>
+                                        </div>
+                                    )}
+                                    {!zipLoading && loadingMessage && (
+                                        <div style={{marginTop: '8px', fontSize: '11px', color: '#2C5134', fontWeight: '500'}}>
+                                            {loadingMessage}
+                                        </div>
+                                    )}
                                 </div>
                             </div>
 
@@ -765,7 +831,6 @@
                                                 setSelectedZip(null);
                                             }}
                                             className="text-gray-400 hover:text-gray-600 text-xl ml-3 p-1 hover:bg-gray-100 rounded flex-shrink-0"
-                                            title="Close panel"
                                         >
                                             ×
                                         </button>
@@ -775,16 +840,12 @@
                                         <div className="space-y-4">
                                             <div>
                                                 <div className="text-xs font-medium text-gray-700 mb-2">Status</div>
-                                                <div className="inline-block px-3 py-1 rounded-full text-sm font-medium bg-green-100" style={{color: '#2C5134'}}>
-                                                    Open
-                                                </div>
+                                                <div className="inline-block px-3 py-1 rounded-full text-sm font-medium bg-green-100" style={{color: '#2C5134'}}>Open</div>
                                             </div>
-                                            
                                             <div>
                                                 <div className="text-xs font-medium text-gray-700 mb-2">Store Number</div>
                                                 <div className="text-sm text-gray-900">{selectedStore.storeNumber}</div>
                                             </div>
-                                            
                                             <div>
                                                 <div className="text-xs font-medium text-gray-700 mb-2">Address</div>
                                                 <div className="text-sm text-gray-900 leading-relaxed">
@@ -792,16 +853,13 @@
                                                     {selectedStore.city}, {selectedStore.state} {selectedStore.zip}
                                                 </div>
                                             </div>
-
                                             <div className="pt-4 border-t">
                                                 <a
                                                     href={CONFIG.RESERVE_URL}
                                                     target="_blank"
                                                     rel="noopener noreferrer"
-                                                    className="w-full text-white px-4 py-3 rounded-lg font-medium text-center block transition-colors text-sm hover:shadow-lg"
+                                                    className="w-full text-white px-4 py-3 rounded-lg font-medium text-center block text-sm hover:shadow-lg"
                                                     style={{backgroundColor: '#2C5134'}}
-                                                    onMouseEnter={(e) => e.target.style.backgroundColor = '#1e3a26'}
-                                                    onMouseLeave={(e) => e.target.style.backgroundColor = '#2C5134'}
                                                 >
                                                     Reserve This Store
                                                 </a>
@@ -813,11 +871,8 @@
                                         <div className="space-y-4">
                                             <div>
                                                 <div className="text-xs font-medium text-gray-700 mb-2">Location</div>
-                                                <div className="text-sm text-gray-900">
-                                                    {selectedZip.city}, {selectedZip.state}
-                                                </div>
+                                                <div className="text-sm text-gray-900">{selectedZip.city}, {selectedZip.state}</div>
                                             </div>
-
                                             <div>
                                                 <div className="text-xs font-medium text-gray-700 mb-2">Coverage Tier</div>
                                                 <div className="inline-block px-3 py-1 rounded-full text-sm font-medium" 
@@ -828,12 +883,10 @@
                                                     Tier {selectedZip.tier}
                                                 </div>
                                             </div>
-
                                             <div>
                                                 <div className="text-xs font-medium text-gray-700 mb-2">Region</div>
                                                 <div className="text-sm text-gray-900">{selectedZip.branch}</div>
                                             </div>
-
                                             <div>
                                                 <div className="text-xs font-medium text-gray-700 mb-2">Nearby Stores</div>
                                                 <div className="text-sm text-gray-600">
